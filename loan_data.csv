@@ -1,0 +1,9 @@
+age,income,loan_amount,credit_history_length,previous_defaults,employment_type,default
+25,30000,10000,2,0,Salaried,0
+40,80000,25000,10,1,Self-employed,1
+35,50000,15000,6,0,Salaried,0
+50,90000,30000,15,2,Business,1
+28,35000,12000,3,0,Salaried,0
+45,70000,20000,12,1,Self-employed,1
+30,40000,13000,5,0,Salaried,0
+38,60000,18000,8,1,Business,1
