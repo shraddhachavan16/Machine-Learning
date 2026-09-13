@@ -1,929 +1,616 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
-
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.datasets import load_digits
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
-import pandas as pd
 import numpy as np
-import random
-
 
 # ============================================================
-# 1. SETUP
+# 1. SETTINGS
 # ============================================================
 
-# Use GPU if available
+EPOCHS = 12
+LEARNING_RATE = 0.001
+
+BATCH_SIZES = [4, 16, 32, 64]
+
+METHODS = [
+    "BatchNorm",
+    "LayerNorm",
+    "RMSNorm",
+    "InstanceNorm",
+    "GroupNorm"
+]
+
+torch.manual_seed(7)
+np.random.seed(7)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("Device:", device)
-
-
-# Fix random seed for fair comparison
-SEED = 42
-
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-random.seed(SEED)
-
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(SEED)
+print("Batch sizes:", BATCH_SIZES)
+print("Normalization methods:", METHODS)
 
 
 # ============================================================
-# 2. LOAD MNIST DATASET
+# 2. LOAD DIGITS DATASET
 # ============================================================
 
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
+digits = load_digits()
 
+X = digits.images
+y = digits.target
 
-train_data = datasets.MNIST(
-    root="./data",
-    train=True,
-    download=True,
-    transform=transform
+# Convert to float
+X = X.astype(np.float32)
+
+# Normalize input pixels
+X = X / 16.0
+
+# Add channel dimension
+X = X[:, np.newaxis, :, :]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=7,
+    stratify=y
 )
 
-test_data = datasets.MNIST(
-    root="./data",
-    train=False,
-    download=True,
-    transform=transform
-)
+X_train = torch.tensor(X_train, dtype=torch.float32)
+X_test = torch.tensor(X_test, dtype=torch.float32)
+
+y_train = torch.tensor(y_train, dtype=torch.long)
+y_test = torch.tensor(y_test, dtype=torch.long)
+
+train_dataset = TensorDataset(X_train, y_train)
+test_dataset = TensorDataset(X_test, y_test)
 
 
 # ============================================================
-# 3. RMS NORMALIZATION
+# 3. CNN MODEL
 # ============================================================
 
-class RMSNorm2D(nn.Module):
-
-    def __init__(self, channels):
-        super().__init__()
-
-        # Learnable scale parameter
-        self.weight = nn.Parameter(
-            torch.ones(1, channels, 1, 1)
-        )
-
-        self.eps = 1e-8
-
-
-    def forward(self, x):
-
-        # x shape:
-        # [batch, channels, height, width]
-
-        # Calculate RMS for each sample
-        rms = torch.sqrt(
-            torch.mean(
-                x ** 2,
-                dim=(1, 2, 3),
-                keepdim=True
-            ) + self.eps
-        )
-
-        # Normalize
-        x = x / rms
-
-        # Learnable scaling
-        x = x * self.weight
-
-        return x
-
-
-# ============================================================
-# 4. LAYER NORMALIZATION FOR CNN
-# ============================================================
-
-class LayerNorm2D(nn.Module):
-
-    def __init__(self, channels, height, width):
-
-        super().__init__()
-
-        # LayerNorm normalizes C,H,W
-        self.norm = nn.LayerNorm(
-            [channels, height, width]
-        )
-
-
-    def forward(self, x):
-
-        return self.norm(x)
-
-
-# ============================================================
-# 5. CNN MODEL
-# ============================================================
-
-class CNN(nn.Module):
+class NormalizationCNN(nn.Module):
 
     def __init__(self, norm_type):
 
         super().__init__()
 
+        self.norm_type = norm_type
+
         # ----------------------------------------------------
         # First convolution
-        # Input: 28 x 28
-        # After MaxPool: 14 x 14
         # ----------------------------------------------------
 
         self.conv1 = nn.Conv2d(
-            1,
-            16,
+            in_channels=1,
+            out_channels=8,
             kernel_size=3,
             padding=1
         )
 
+        # ----------------------------------------------------
+        # First normalization
+        # ----------------------------------------------------
 
-        # Select normalization method
         if norm_type == "BatchNorm":
 
-            self.norm1 = nn.BatchNorm2d(16)
-
-
-        elif norm_type == "LayerNorm":
-
-            self.norm1 = LayerNorm2D(
-                16,
-                28,
-                28
-            )
-
-
-        elif norm_type == "RMSNorm":
-
-            self.norm1 = RMSNorm2D(16)
-
+            self.norm1 = nn.BatchNorm2d(8)
 
         elif norm_type == "InstanceNorm":
 
             self.norm1 = nn.InstanceNorm2d(
-                16,
+                8,
                 affine=True
             )
-
 
         elif norm_type == "GroupNorm":
 
             self.norm1 = nn.GroupNorm(
-                4,
-                16
+                num_groups=4,
+                num_channels=8
             )
 
+        # LayerNorm and RMSNorm will be applied after
+        # flattening the feature map.
 
         # ----------------------------------------------------
         # Second convolution
         # ----------------------------------------------------
 
         self.conv2 = nn.Conv2d(
-            16,
-            32,
+            in_channels=8,
+            out_channels=16,
             kernel_size=3,
             padding=1
         )
 
+        # ----------------------------------------------------
+        # Second normalization
+        # ----------------------------------------------------
 
         if norm_type == "BatchNorm":
 
-            self.norm2 = nn.BatchNorm2d(32)
-
-
-        elif norm_type == "LayerNorm":
-
-            self.norm2 = LayerNorm2D(
-                32,
-                14,
-                14
-            )
-
-
-        elif norm_type == "RMSNorm":
-
-            self.norm2 = RMSNorm2D(32)
-
+            self.norm2 = nn.BatchNorm2d(16)
 
         elif norm_type == "InstanceNorm":
 
             self.norm2 = nn.InstanceNorm2d(
-                32,
+                16,
                 affine=True
             )
-
 
         elif norm_type == "GroupNorm":
 
             self.norm2 = nn.GroupNorm(
-                4,
-                32
+                num_groups=4,
+                num_channels=16
             )
 
-
         # ----------------------------------------------------
-        # Fully connected layers
+        # Fully connected layer
         # ----------------------------------------------------
 
-        self.fc1 = nn.Linear(
-            32 * 7 * 7,
-            128
-        )
+        self.fc = nn.Linear(16 * 2 * 2, 10)
 
-        self.fc2 = nn.Linear(
-            128,
-            10
-        )
+        # LayerNorm / RMSNorm
+        #
+        # After two pooling operations:
+        #
+        # 8x8 -> 4x4 -> 2x2
+        #
+        # Therefore:
+        #
+        # 16 channels * 2 * 2 = 64
+        #
 
+        if norm_type == "LayerNorm":
 
-        self.relu = nn.ReLU()
+            self.feature_norm = nn.LayerNorm(64)
 
-        self.pool = nn.MaxPool2d(2)
+        elif norm_type == "RMSNorm":
+
+            self.feature_norm = nn.RMSNorm(64)
 
 
     def forward(self, x):
 
-        # First convolution
+        # ----------------------------------------------------
+        # Convolution 1
+        # ----------------------------------------------------
+
         x = self.conv1(x)
 
-        x = self.norm1(x)
+        # Apply normalization
+        if self.norm_type in [
+            "BatchNorm",
+            "InstanceNorm",
+            "GroupNorm"
+        ]:
 
-        x = self.relu(x)
+            x = self.norm1(x)
 
-        x = self.pool(x)
+        x = torch.relu(x)
 
-        # Shape:
-        # [batch, 16, 14, 14]
+        # Pool
+        x = nn.functional.max_pool2d(x, 2)
 
+        # ----------------------------------------------------
+        # Convolution 2
+        # ----------------------------------------------------
 
-        # Second convolution
         x = self.conv2(x)
 
-        x = self.norm2(x)
+        # Apply normalization
+        if self.norm_type in [
+            "BatchNorm",
+            "InstanceNorm",
+            "GroupNorm"
+        ]:
 
-        x = self.relu(x)
+            x = self.norm2(x)
 
-        x = self.pool(x)
+        x = torch.relu(x)
 
-        # Shape:
-        # [batch, 32, 7, 7]
+        # Pool
+        x = nn.functional.max_pool2d(x, 2)
 
-
+        # ----------------------------------------------------
         # Flatten
-        x = x.view(
-            x.size(0),
-            -1
-        )
+        # ----------------------------------------------------
 
+        x = torch.flatten(x, start_dim=1)
 
-        # Fully connected
-        x = self.relu(
-            self.fc1(x)
-        )
+        # ----------------------------------------------------
+        # LayerNorm / RMSNorm
+        # ----------------------------------------------------
 
-        x = self.fc2(x)
+        if self.norm_type in [
+            "LayerNorm",
+            "RMSNorm"
+        ]:
+
+            x = self.feature_norm(x)
+
+        # ----------------------------------------------------
+        # Classification
+        # ----------------------------------------------------
+
+        x = self.fc(x)
 
         return x
 
 
 # ============================================================
-# 6. TRAINING FUNCTION
+# 4. TRAINING FUNCTION
 # ============================================================
 
-def train_model(
-    norm_type,
-    batch_size,
-    epochs=5
-):
+def train_model(norm_type, batch_size):
 
-    print("\n====================================")
+    print()
+    print("=" * 60)
     print("Normalization:", norm_type)
     print("Batch Size:", batch_size)
-    print("====================================")
-
-
-    # --------------------------------------------------------
-    # Data loaders
-    # --------------------------------------------------------
+    print("=" * 60)
 
     train_loader = DataLoader(
-        train_data,
+        train_dataset,
         batch_size=batch_size,
         shuffle=True
     )
 
-
     test_loader = DataLoader(
-        test_data,
-        batch_size=256,
+        test_dataset,
+        batch_size=batch_size,
         shuffle=False
     )
 
-
-    # --------------------------------------------------------
     # Create model
-    # --------------------------------------------------------
+    model = NormalizationCNN(norm_type).to(device)
 
-    model = CNN(norm_type).to(device)
-
-
-    # Loss function
+    # Loss
     criterion = nn.CrossEntropyLoss()
-
 
     # Optimizer
     optimizer = optim.Adam(
         model.parameters(),
-        lr=0.001
+        lr=LEARNING_RATE
     )
 
-
-    # Store results
     train_losses = []
-    test_losses = []
-    accuracies = []
+    train_accuracies = []
 
+    # --------------------------------------------------------
+    # Training
+    # --------------------------------------------------------
 
-    # ========================================================
-    # EPOCH LOOP
-    # ========================================================
-
-    for epoch in range(epochs):
-
-        # ----------------------------------------------------
-        # TRAINING
-        # ----------------------------------------------------
+    for epoch in range(EPOCHS):
 
         model.train()
 
-        total_train_loss = 0
-
+        running_loss = 0.0
+        correct = 0
+        total = 0
 
         for images, labels in train_loader:
 
             images = images.to(device)
             labels = labels.to(device)
 
-
-            # Clear old gradients
+            # Clear gradients
             optimizer.zero_grad()
-
 
             # Forward pass
             outputs = model(images)
 
-
             # Calculate loss
-            loss = criterion(
-                outputs,
-                labels
-            )
-
+            loss = criterion(outputs, labels)
 
             # Backpropagation
             loss.backward()
 
-
             # Update weights
             optimizer.step()
 
+            # Statistics
+            running_loss += loss.item() * images.size(0)
 
-            total_train_loss += loss.item()
+            _, predicted = torch.max(
+                outputs,
+                1
+            )
 
+            total += labels.size(0)
 
-        # Average training loss
-        avg_train_loss = (
-            total_train_loss /
-            len(train_loader)
-        )
+            correct += (
+                predicted == labels
+            ).sum().item()
 
+        epoch_loss = running_loss / total
 
-        # ----------------------------------------------------
-        # TESTING / VALIDATION
-        # ----------------------------------------------------
-
-        model.eval()
-
-        total_test_loss = 0
-
-        correct = 0
-        total = 0
-
-
-        with torch.no_grad():
-
-            for images, labels in test_loader:
-
-                images = images.to(device)
-                labels = labels.to(device)
-
-
-                outputs = model(images)
-
-
-                loss = criterion(
-                    outputs,
-                    labels
-                )
-
-
-                total_test_loss += loss.item()
-
-
-                # Prediction
-                predicted = torch.argmax(
-                    outputs,
-                    dim=1
-                )
-
-
-                total += labels.size(0)
-
-                correct += (
-                    predicted == labels
-                ).sum().item()
-
-
-        # Average validation loss
-        avg_test_loss = (
-            total_test_loss /
-            len(test_loader)
-        )
-
-
-        # Accuracy
-        accuracy = (
+        epoch_accuracy = (
             100 * correct / total
         )
 
+        train_losses.append(epoch_loss)
 
-        # Store results
-        train_losses.append(
-            avg_train_loss
+        train_accuracies.append(
+            epoch_accuracy
         )
-
-        test_losses.append(
-            avg_test_loss
-        )
-
-        accuracies.append(
-            accuracy
-        )
-
 
         print(
-            f"Epoch {epoch + 1}/{epochs} | "
-            f"Train Loss: {avg_train_loss:.4f} | "
-            f"Test Loss: {avg_test_loss:.4f} | "
-            f"Accuracy: {accuracy:.2f}%"
+            f"Epoch [{epoch + 1:02d}/{EPOCHS}] "
+            f"Loss: {epoch_loss:.4f} "
+            f"Accuracy: {epoch_accuracy:.2f}%"
         )
 
-
     # ========================================================
-    # CALCULATE STABILITY
+    # TESTING
     # ========================================================
 
-    # Standard deviation of training loss
-    # Lower = more stable
+    model.eval()
 
-    stability = np.std(
-        train_losses
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+
+        for images, labels in test_loader:
+
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+
+            _, predicted = torch.max(
+                outputs,
+                1
+            )
+
+            total += labels.size(0)
+
+            correct += (
+                predicted == labels
+            ).sum().item()
+
+    test_accuracy = (
+        100 * correct / total
     )
 
-
-    # ========================================================
-    # CONVERGENCE
-    # ========================================================
-
-    # Epoch where minimum training loss occurred
-
-    convergence_epoch = (
-        np.argmin(train_losses) + 1
+    print(
+        f"Final Test Accuracy: "
+        f"{test_accuracy:.2f}%"
     )
-
 
     return {
-
-        "train_loss": train_losses,
-
-        "test_loss": test_losses,
-
-        "accuracy": accuracies,
-
-        "final_train_loss":
-            train_losses[-1],
-
-        "final_test_loss":
-            test_losses[-1],
-
-        "final_accuracy":
-            accuracies[-1],
-
-        "stability":
-            stability,
-
-        "convergence_epoch":
-            convergence_epoch
+        "loss": train_losses,
+        "accuracy": train_accuracies,
+        "test_accuracy": test_accuracy
     }
 
 
 # ============================================================
-# 7. RUN EXPERIMENT
+# 5. RUN ALL EXPERIMENTS
 # ============================================================
-
-normalizations = [
-
-    "BatchNorm",
-    "LayerNorm",
-    "RMSNorm",
-    "InstanceNorm",
-    "GroupNorm"
-
-]
-
-
-batch_sizes = [
-
-    64,
-    16,
-    4,
-    1
-
-]
-
 
 results = {}
 
+for batch_size in BATCH_SIZES:
 
-# ------------------------------------------------------------
-# Run every combination
-# ------------------------------------------------------------
+    results[batch_size] = {}
 
-for norm in normalizations:
+    for method in METHODS:
 
-    for batch in batch_sizes:
-
-        # ----------------------------------------------------
-        # BatchNorm with batch size 1
-        # ----------------------------------------------------
-        #
-        # BatchNorm is dependent on batch statistics.
-        # If it fails for B=1, we skip it.
-        #
-
-        try:
-
-            result = train_model(
-                norm,
-                batch,
-                epochs=5
-            )
-
-            results[
-                (norm, batch)
-            ] = result
-
-
-        except Exception as e:
-
-            print(
-                f"\nSkipped {norm} "
-                f"with batch size {batch}"
-            )
-
-            print("Reason:", e)
+        results[batch_size][method] = train_model(
+            method,
+            batch_size
+        )
 
 
 # ============================================================
-# 8. CREATE FINAL RESULTS TABLE
+# 6. PRINT FINAL RESULTS
 # ============================================================
 
-rows = []
-
-
-for (norm, batch), result in results.items():
-
-    rows.append({
-
-        "Normalization": norm,
-
-        "Batch Size": batch,
-
-        "Final Train Loss":
-            result["final_train_loss"],
-
-        "Final Test Loss":
-            result["final_test_loss"],
-
-        "Final Accuracy":
-            result["final_accuracy"],
-
-        "Stability":
-            result["stability"],
-
-        "Convergence Epoch":
-            result["convergence_epoch"]
-
-    })
-
-
-results_df = pd.DataFrame(rows)
-
-
-print("\n\n====================================")
-print("FINAL EXPERIMENT RESULTS")
-print("====================================")
+print()
+print()
+print("=" * 80)
+print("FINAL TEST ACCURACY COMPARISON")
+print("=" * 80)
 
 print(
-    results_df.to_string(
-        index=False
+    f"{'Batch Size':<15}"
+    f"{'BatchNorm':<15}"
+    f"{'LayerNorm':<15}"
+    f"{'RMSNorm':<15}"
+    f"{'InstanceNorm':<15}"
+    f"{'GroupNorm':<15}"
+)
+
+print("-" * 80)
+
+for batch_size in BATCH_SIZES:
+
+    print(
+        f"{batch_size:<15}"
+        f"{results[batch_size]['BatchNorm']['test_accuracy']:<15.2f}"
+        f"{results[batch_size]['LayerNorm']['test_accuracy']:<15.2f}"
+        f"{results[batch_size]['RMSNorm']['test_accuracy']:<15.2f}"
+        f"{results[batch_size]['InstanceNorm']['test_accuracy']:<15.2f}"
+        f"{results[batch_size]['GroupNorm']['test_accuracy']:<15.2f}"
     )
-)
-
-
-# Save table
-results_df.to_csv(
-    "normalization_results.csv",
-    index=False
-)
 
 
 # ============================================================
-# 9. GRAPH 1 — TRAINING LOSS
+# 7. GRAPH 1
+# TRAINING LOSS FOR DIFFERENT BATCH SIZES
 # ============================================================
 
-plt.figure(figsize=(10, 6))
+for batch_size in BATCH_SIZES:
 
+    plt.figure(figsize=(9, 6))
 
-# Example: compare all normalization methods
-# at batch size = 4
-
-for norm in normalizations:
-
-    if (norm, 4) in results:
-
-        losses = results[
-            (norm, 4)
-        ]["train_loss"]
-
+    for method in METHODS:
 
         plt.plot(
-            range(1, len(losses) + 1),
-            losses,
+            range(1, EPOCHS + 1),
+            results[batch_size][method]["loss"],
             marker="o",
-            label=norm
+            label=method
         )
 
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
 
-plt.xlabel("Epoch")
+    plt.title(
+        f"Training Loss - Batch Size {batch_size}"
+    )
 
-plt.ylabel("Training Loss")
+    plt.legend()
+    plt.grid(True)
 
-plt.title(
-    "Training Loss Comparison - Batch Size 4"
-)
+    plt.tight_layout()
 
-plt.legend()
+    plt.savefig(
+        f"loss_batch_{batch_size}.png",
+        dpi=300
+    )
 
-plt.grid(True)
-
-plt.tight_layout()
-
-plt.savefig(
-    "training_loss_batch4.png"
-)
-
-plt.show()
+    plt.show()
 
 
 # ============================================================
-# 10. GRAPH 2 — VALIDATION LOSS
+# 8. GRAPH 2
+# TRAINING ACCURACY FOR DIFFERENT BATCH SIZES
 # ============================================================
 
-plt.figure(figsize=(10, 6))
+for batch_size in BATCH_SIZES:
 
+    plt.figure(figsize=(9, 6))
 
-for norm in normalizations:
-
-    if (norm, 4) in results:
-
-        losses = results[
-            (norm, 4)
-        ]["test_loss"]
-
+    for method in METHODS:
 
         plt.plot(
-            range(1, len(losses) + 1),
-            losses,
+            range(1, EPOCHS + 1),
+            results[batch_size][method]["accuracy"],
             marker="o",
-            label=norm
+            label=method
         )
 
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Accuracy (%)")
 
-plt.xlabel("Epoch")
+    plt.title(
+        f"Training Accuracy - Batch Size {batch_size}"
+    )
 
-plt.ylabel("Validation/Test Loss")
+    plt.legend()
+    plt.grid(True)
 
-plt.title(
-    "Validation Loss Comparison - Batch Size 4"
-)
+    plt.tight_layout()
 
-plt.legend()
+    plt.savefig(
+        f"accuracy_batch_{batch_size}.png",
+        dpi=300
+    )
 
-plt.grid(True)
-
-plt.tight_layout()
-
-plt.savefig(
-    "validation_loss_batch4.png"
-)
-
-plt.show()
+    plt.show()
 
 
 # ============================================================
-# 11. GRAPH 3 — FINAL ACCURACY
+# 9. GRAPH 3
+# FINAL TEST ACCURACY FOR ALL BATCH SIZES
 # ============================================================
 
-plt.figure(figsize=(10, 6))
-
-
-for norm in normalizations:
+for method in METHODS:
 
     accuracies = []
-    batches = []
 
+    for batch_size in BATCH_SIZES:
 
-    for batch in batch_sizes:
-
-        if (norm, batch) in results:
-
-            accuracies.append(
-                results[
-                    (norm, batch)
-                ]["final_accuracy"]
-            )
-
-            batches.append(batch)
-
-
-    if len(accuracies) > 0:
-
-        plt.plot(
-            batches,
-            accuracies,
-            marker="o",
-            label=norm
+        accuracies.append(
+            results[batch_size][method]["test_accuracy"]
         )
+
+    plt.plot(
+        BATCH_SIZES,
+        accuracies,
+        marker="o",
+        label=method
+    )
 
 
 plt.xlabel("Batch Size")
-
-plt.ylabel("Final Accuracy (%)")
+plt.ylabel("Final Test Accuracy (%)")
 
 plt.title(
-    "Batch-Size Sensitivity - Final Accuracy"
+    "Effect of Batch Size on Normalization Methods"
 )
 
+plt.xticks(BATCH_SIZES)
+
 plt.legend()
-
 plt.grid(True)
-
-# Reverse x-axis so 64 → 16 → 4 → 1
-plt.gca().invert_xaxis()
 
 plt.tight_layout()
 
 plt.savefig(
-    "batch_size_sensitivity.png"
+    "batch_size_comparison.png",
+    dpi=300
 )
 
 plt.show()
 
 
 # ============================================================
-# 12. GRAPH 4 — STABILITY
+# 10. GRAPH 4
+# COMPARISON FOR EACH BATCH SIZE
 # ============================================================
 
-plt.figure(figsize=(10, 6))
+for batch_size in BATCH_SIZES:
 
+    accuracies = []
 
-for norm in normalizations:
+    for method in METHODS:
 
-    stability_values = []
-    batches = []
-
-
-    for batch in batch_sizes:
-
-        if (norm, batch) in results:
-
-            stability_values.append(
-                results[
-                    (norm, batch)
-                ]["stability"]
-            )
-
-            batches.append(batch)
-
-
-    if len(stability_values) > 0:
-
-        plt.plot(
-            batches,
-            stability_values,
-            marker="o",
-            label=norm
+        accuracies.append(
+            results[batch_size][method]["test_accuracy"]
         )
 
+    plt.figure(figsize=(9, 6))
 
-plt.xlabel("Batch Size")
+    plt.bar(
+        METHODS,
+        accuracies
+    )
 
-plt.ylabel("Training Loss Standard Deviation")
+    plt.xlabel("Normalization Method")
+    plt.ylabel("Final Test Accuracy (%)")
 
-plt.title(
-    "Training Stability vs Batch Size"
-)
+    plt.title(
+        f"Normalization Comparison - Batch Size {batch_size}"
+    )
 
-plt.legend()
+    plt.xticks(rotation=20)
 
-plt.grid(True)
+    plt.grid(
+        axis="y",
+        alpha=0.3
+    )
 
-plt.gca().invert_xaxis()
+    plt.tight_layout()
 
-plt.tight_layout()
+    plt.savefig(
+        f"final_accuracy_batch_{batch_size}.png",
+        dpi=300
+    )
 
-plt.savefig(
-    "training_stability.png"
-)
-
-plt.show()
-
-
-# ============================================================
-# 13. FIND BEST ACCURACY
-# ============================================================
-
-best_result = results_df.loc[
-    results_df["Final Accuracy"].idxmax()
-]
+    plt.show()
 
 
-print("\n====================================")
-print("BEST FINAL ACCURACY")
-print("====================================")
-
-print(
-    "Normalization:",
-    best_result["Normalization"]
-)
-
-print(
-    "Batch Size:",
-    best_result["Batch Size"]
-)
-
-print(
-    "Accuracy:",
-    f'{best_result["Final Accuracy"]:.2f}%'
-)
-
-
-# ============================================================
-# 14. SIMPLE OBSERVATIONS
-# ============================================================
-
-print("\n====================================")
-print("OBSERVATIONS")
-print("====================================")
-
-print("""
-1. Training loss should decrease as epochs increase.
-
-2. Lower validation loss indicates better generalization.
-
-3. Higher accuracy indicates better prediction performance.
-
-4. BatchNorm usually performs well with larger batches.
-
-5. BatchNorm can become more sensitive when batch size is very small.
-
-6. LayerNorm and RMSNorm do not depend on batch statistics.
-
-7. InstanceNorm is useful for image/style-related tasks.
-
-8. GroupNorm is a strong choice for CNNs with small batches.
-
-9. Stability is better when training loss has less fluctuation.
-
-10. The best normalization method depends on the task and batch size.
-""")
-
-
-print("\nExperiment completed.")
-print("Results saved to normalization_results.csv")
-print("Graphs saved as PNG files.")
+print()
+print("Experiment completed.")
+print("Graphs have been saved.")
