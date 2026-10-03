@@ -1,0 +1,4 @@
+A crossover point is a place where two roads, paths, lines, or routes cross each other.
+
+In this experiment, crossover point refers to roads or transportation routes.
+It does not refer to Genetic Algorithms.
