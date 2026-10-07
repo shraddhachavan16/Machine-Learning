@@ -5,15 +5,13 @@ import ollama
 st.title("Context + User Query")
 
 st.write("Enter a context and ask a question.")
-
-# Context
 context = st.text_area(
     "Enter Context",
     height=150,
     placeholder="Example: Python is a programming language used for AI and data science."
 )
 
-# User question
+
 question = st.text_input(
     "Enter Your Question",
     placeholder="Example: What is Python used for?"
